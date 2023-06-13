@@ -49,7 +49,7 @@ Diagnostics::BaseReadParameters ()
 {
     auto & warpx = WarpX::GetInstance();
 
-    amrex::ParmParse pp_diag_name(m_diag_name);
+    const amrex::ParmParse pp_diag_name(m_diag_name);
     m_file_prefix = "diags/" + m_diag_name;
     pp_diag_name.query("file_prefix", m_file_prefix);
     utils::parser::queryWithParser(
@@ -57,12 +57,12 @@ Diagnostics::BaseReadParameters ()
     pp_diag_name.query("format", m_format);
     pp_diag_name.query("dump_last_timestep", m_dump_last_timestep);
 
-    amrex::ParmParse pp_geometry("geometry");
+    const amrex::ParmParse pp_geometry("geometry");
     std::string dims;
     pp_geometry.get("dims", dims);
 
     // Query list of grid fields to write to output
-    bool varnames_specified = pp_diag_name.queryarr("fields_to_plot", m_varnames_fields);
+    const bool varnames_specified = pp_diag_name.queryarr("fields_to_plot", m_varnames_fields);
     if (!varnames_specified){
         if( dims == "RZ" ) {
             m_varnames_fields = {"Er", "Et", "Ez", "Br", "Bt", "Bz", "jr", "jt", "jz"};
@@ -126,7 +126,7 @@ Diagnostics::BaseReadParameters ()
     std::string parser_str;
     std::string filter_parser_str = "";
     bool do_parser_filter;
-    amrex::ParmParse pp_diag_pfield(m_diag_name + ".particle_fields");
+    const amrex::ParmParse pp_diag_pfield(m_diag_name + ".particle_fields");
     for (const auto& var : m_pfield_varnames) {
         bool do_average = true;
         pp_diag_pfield.query((var + ".do_average").c_str(), do_average);
@@ -187,9 +187,9 @@ Diagnostics::BaseReadParameters ()
 
     m_varnames = m_varnames_fields;
     // Generate names of averaged particle fields and append to m_varnames
-    for (int ivar=0; ivar<m_pfield_varnames.size(); ivar++) {
-        for (int ispec=0; ispec < int(m_pfield_species.size()); ispec++) {
-            m_varnames.push_back(m_pfield_varnames[ivar] + '_' + m_pfield_species[ispec]);
+    for (const auto& fname : m_pfield_varnames) {
+        for (const auto& sname : m_pfield_species) {
+            m_varnames.push_back(fname + '_' + sname);
         }
     }
 
@@ -224,7 +224,7 @@ Diagnostics::BaseReadParameters ()
        if (warpx.boost_direction[ dim_map[warpx.moving_window_dir] ] == 1) {
            // Convert user-defined lo and hi for diagnostics to account for boosted-frame
            // simulations with moving window
-           amrex::Real convert_factor = 1._rt/(warpx.gamma_boost * (1._rt - warpx.beta_boost) );
+           const amrex::Real convert_factor = 1._rt/(warpx.gamma_boost * (1._rt - warpx.beta_boost) );
            // Assuming that the window travels with speed c
            m_lo[warpx.moving_window_dir] *= convert_factor;
            m_hi[warpx.moving_window_dir] *= convert_factor;
@@ -295,13 +295,18 @@ Diagnostics::BaseReadParameters ()
 
 
 void
-Diagnostics::InitData ()
+Diagnostics::InitDataBeforeRestart ()
 {
     // initialize member variables and arrays in base class::Diagnostics
     InitBaseData();
     // initialize member variables and arrays specific to each derived class
     // (FullDiagnostics, BTDiagnostics, etc.)
     DerivedInitData();
+}
+
+void
+Diagnostics::InitDataAfterRestart ()
+{
     for (int i_buffer = 0; i_buffer < m_num_buffers; ++i_buffer) {
         // loop over all levels
         // This includes full diagnostics and BTD as well as cell-center functors for BTD.
@@ -316,11 +321,90 @@ Diagnostics::InitData ()
         // and only the coarse level (mother grid) for BTD
         for (int lev = 0; lev < nlev_output; ++lev) {
             // Initialize buffer data required for particle and/or fields
+            InitializeBufferData(i_buffer, lev, true);
+        }
+    }
+
+    const amrex::ParmParse pp_diag_name(m_diag_name);
+    // default for writing species output is 1
+    int write_species = 1;
+    pp_diag_name.query("write_species", write_species);
+    if (write_species == 1) {
+        // When particle buffers, m_particle_boundary_buffer are included,
+        // they will be initialized here
+        InitializeParticleBuffer();
+        InitializeParticleFunctors();
+    }
+   if (write_species == 0) {
+        WARPX_ALWAYS_ASSERT_WITH_MESSAGE(
+            m_format != "checkpoint",
+            "For checkpoint format, write_species flag must be 1."
+        );
+        // if user-defined value for write_species == 0, then clear species vector
+        for (int i_buffer = 0; i_buffer < m_num_buffers; ++i_buffer ) {
+            m_output_species.at(i_buffer).clear();
+        }
+        m_output_species_names.clear();
+    } else {
+        amrex::Vector <amrex::Real> dummy_val(AMREX_SPACEDIM);
+        if ( utils::parser::queryArrWithParser(
+                pp_diag_name, "diag_lo", dummy_val, 0, AMREX_SPACEDIM) ||
+             utils::parser::queryArrWithParser(
+                pp_diag_name, "diag_hi", dummy_val, 0, AMREX_SPACEDIM) ) {
+            // set geometry filter for particle-diags to true when the diagnostic domain-extent
+            // is specified by the user.
+            // Note that the filter is set for every ith snapshot, and the number of snapshots
+            // for full diagnostics is 1, while for BTD it is user-defined.
+            for (int i_buffer = 0; i_buffer < m_num_buffers; ++i_buffer ) {
+                for (auto& v : m_output_species.at(i_buffer)) {
+                    v.m_do_geom_filter = true;
+                }
+                // Disabling particle-io for reduced domain diagnostics by reducing
+                // the particle-diag vector to zero.
+                // This is a temporary fix until particle_buffer is supported in diagnostics.
+                m_output_species.at(i_buffer).clear();
+            }
+            std::string warnMsg = "For full diagnostics on a reduced domain, particle I/O is not ";
+            warnMsg += "supported, yet! Therefore, particle I/O is disabled for this diagnostics: ";
+            warnMsg += m_diag_name;
+            ablastr::warn_manager::WMRecordWarning("Diagnostics", warnMsg);
+        }
+    }
+}
+
+
+void
+Diagnostics::InitData ()
+{
+    auto& warpx = WarpX::GetInstance();
+
+    // Get current finest level available
+    const int finest_level = warpx.finestLevel();
+
+    // initialize member variables and arrays in base class::Diagnostics
+    InitBaseData();
+    // initialize member variables and arrays specific to each derived class
+    // (FullDiagnostics, BTDiagnostics, etc.)
+    DerivedInitData();
+    for (int i_buffer = 0; i_buffer < m_num_buffers; ++i_buffer) {
+        // loop over all levels
+        // This includes full diagnostics and BTD as well as cell-center functors for BTD.
+        // Note that the cell-centered data for BTD is computed for all levels and hence
+        // the corresponding functor is also initialized for all the levels
+        for (int lev = 0; lev <= finest_level; ++lev) {
+            // allocate and initialize m_all_field_functors depending on diag type
+            InitializeFieldFunctors(lev);
+        }
+        // loop over the levels selected for output
+        // This includes all the levels for full diagnostics
+        // and only the coarse level (mother grid) for BTD
+        for (int lev = 0; lev < nlev_output; ++lev) {
+            // Initialize buffer data required for particle and/or fields
             InitializeBufferData(i_buffer, lev);
         }
     }
 
-    amrex::ParmParse pp_diag_name(m_diag_name);
+    const amrex::ParmParse pp_diag_name(m_diag_name);
     // default for writing species output is 1
     int write_species = 1;
     pp_diag_name.query("write_species", write_species);
@@ -384,8 +468,8 @@ Diagnostics::InitBaseData ()
     // For restart, move the m_lo and m_hi of the diag consistent with the
     // current moving_window location
     if (warpx.do_moving_window) {
-        int moving_dir = warpx.moving_window_dir;
-        int shift_num_base = static_cast<int>((warpx.getmoving_window_x() - m_lo[moving_dir]) / warpx.Geom(0).CellSize(moving_dir) );
+        const int moving_dir = warpx.moving_window_dir;
+        const int shift_num_base = static_cast<int>((warpx.getmoving_window_x() - m_lo[moving_dir]) / warpx.Geom(0).CellSize(moving_dir) );
         m_lo[moving_dir] += shift_num_base * warpx.Geom(0).CellSize(moving_dir);
         m_hi[moving_dir] += shift_num_base * warpx.Geom(0).CellSize(moving_dir);
     }
@@ -403,19 +487,19 @@ Diagnostics::InitBaseData ()
             dynamic_cast<amrex::AmrMesh*>(const_cast<WarpX*>(&warpx)),
             m_diag_name);
 #else
-        amrex::Abort(Utils::TextMsg::Err(
-            "To use SENSEI in situ, compile with USE_SENSEI=TRUE"));
+        WARPX_ABORT_WITH_MESSAGE(
+            "To use SENSEI in situ, compile with USE_SENSEI=TRUE");
 #endif
     } else if (m_format == "openpmd"){
 #ifdef WARPX_USE_OPENPMD
         m_flush_format = std::make_unique<FlushFormatOpenPMD>(m_diag_name);
 #else
-        amrex::Abort(Utils::TextMsg::Err(
-            "To use openpmd output format, need to compile with USE_OPENPMD=TRUE"));
+        WARPX_ABORT_WITH_MESSAGE(
+            "To use openpmd output format, need to compile with USE_OPENPMD=TRUE");
 #endif
     } else {
-        amrex::Abort(Utils::TextMsg::Err(
-            "unknown output format"));
+        WARPX_ABORT_WITH_MESSAGE(
+            "unknown output format");
     }
 
     // allocate vector of buffers then allocate vector of levels for each buffer

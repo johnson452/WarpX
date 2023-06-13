@@ -10,6 +10,7 @@
 #include "Utils/TextMsg.H"
 #include "Utils/WarpXProfilerWrapper.H"
 #include "WarpX.H"
+#include "Diagnostics/MultiDiagnostics.H"
 
 #include <AMReX.H>
 #include <AMReX_Box.H>
@@ -83,7 +84,7 @@ FlushFormatPlotfile::WriteToFile (
     }
 
     Vector<std::string> rfs;
-    VisMF::Header::Version current_version = VisMF::GetHeaderVersion();
+    const VisMF::Header::Version current_version = VisMF::GetHeaderVersion();
     VisMF::SetHeaderVersion(amrex::VisMF::Header::Version_v1);
     if (plot_raw_fields) rfs.emplace_back("raw_fields");
     amrex::WriteMultiLevelPlotfile(filename, nlev,
@@ -119,7 +120,7 @@ FlushFormatPlotfile::WriteJobInfo(const std::string& dir) const
         std::ofstream jobInfoFile;
         std::string FullPathJobInfoFile = dir;
 
-        std::string PrettyLine = std::string(78, '=') + "\n";
+        const std::string PrettyLine = std::string(78, '=') + "\n";
 //        std::string OtherLine = std::string(78, '-') + "\n";
 //        std::string SkipSpace = std::string(8, ' ') + "\n";
 
@@ -240,7 +241,7 @@ FlushFormatPlotfile::WriteWarpXHeader(
         VisMF::IO_Buffer io_buffer(VisMF::IO_Buffer_Size);
         std::ofstream HeaderFile;
         HeaderFile.rdbuf()->pubsetbuf(io_buffer.dataPtr(), io_buffer.size());
-        std::string HeaderFileName(name + "/WarpXHeader");
+        const std::string HeaderFileName(name + "/WarpXHeader");
         HeaderFile.open(HeaderFileName.c_str(), std::ofstream::out   |
                                                 std::ofstream::trunc |
                                                 std::ofstream::binary);
@@ -306,6 +307,27 @@ FlushFormatPlotfile::WriteWarpXHeader(
         HeaderFile << warpx.getdo_moving_window() << "\n";
 
         HeaderFile << warpx.time_of_last_gal_shift << "\n";
+
+        for (int idiag = 0; idiag < warpx.GetMultiDiags().GetTotalDiags(); ++idiag)
+        {
+            if( warpx.GetMultiDiags().diagstypes(idiag) == DiagTypes::BackTransformed )
+            {
+                auto& diag = warpx.GetMultiDiags().GetDiag(idiag);
+                for (int i_buffer=0; i_buffer<diag.getnumbuffers(); ++i_buffer){
+                    HeaderFile << diag.gettlab(i_buffer) << "\n";
+                    HeaderFile << diag.get_buffer_k_index_hi(i_buffer) << "\n";
+                    for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+                        HeaderFile << diag.get_snapshot_domain_lo(i_buffer, idim) << "\n";
+                    }
+                    for (int idim = 0; idim < AMREX_SPACEDIM; ++idim) {
+                        HeaderFile << diag.get_snapshot_domain_hi(i_buffer, idim) << "\n";
+                    }
+                    HeaderFile << diag.get_flush_counter(i_buffer) << "\n";
+                    HeaderFile << diag.get_last_valid_Zslice(i_buffer) << "\n";
+                    HeaderFile << diag.get_snapshot_full_flag(i_buffer) << "\n";
+                }
+            }
+        }
     }
 }
 
@@ -315,13 +337,11 @@ FlushFormatPlotfile::WriteParticles(const std::string& dir,
                                     bool isBTD) const
 {
 
-    for (unsigned i = 0, n = particle_diags.size(); i < n; ++i) {
-        WarpXParticleContainer* pc = particle_diags[i].getParticleContainer();
-        auto tmp = pc->make_alike<amrex::PinnedArenaAllocator>();
-        if (isBTD) {
-            PinnedMemoryParticleContainer* pinned_pc = particle_diags[i].getPinnedParticleContainer();
-            tmp = pinned_pc->make_alike<amrex::PinnedArenaAllocator>();
-        }
+    for (auto& part_diag : particle_diags) {
+        WarpXParticleContainer* pc = part_diag.getParticleContainer();
+        auto tmp = isBTD ?
+            part_diag.getPinnedParticleContainer()->make_alike<amrex::PinnedArenaAllocator>() :
+            pc->make_alike<amrex::PinnedArenaAllocator>();
 
         Vector<std::string> real_names;
         Vector<std::string> int_names;
@@ -344,7 +364,7 @@ FlushFormatPlotfile::WriteParticles(const std::string& dir,
         for (auto const& x : runtime_rnames) { real_names[x.second+PIdx::nattribs] = x.first; }
 
         // plot any "extra" fields by default
-        real_flags = particle_diags[i].m_plot_flags;
+        real_flags = part_diag.m_plot_flags;
         real_flags.resize(pc->NumRealComps(), 1);
 
         // and the names
@@ -356,17 +376,17 @@ FlushFormatPlotfile::WriteParticles(const std::string& dir,
         int_flags.resize(pc->NumIntComps(), 1);
 
         const auto mass = pc->AmIA<PhysicalSpecies::photon>() ? PhysConst::m_e : pc->getMass();
-        RandomFilter const random_filter(particle_diags[i].m_do_random_filter,
-                                         particle_diags[i].m_random_fraction);
-        UniformFilter const uniform_filter(particle_diags[i].m_do_uniform_filter,
-                                           particle_diags[i].m_uniform_stride);
-        ParserFilter parser_filter(particle_diags[i].m_do_parser_filter,
+        RandomFilter const random_filter(part_diag.m_do_random_filter,
+                                         part_diag.m_random_fraction);
+        UniformFilter const uniform_filter(part_diag.m_do_uniform_filter,
+                                           part_diag.m_uniform_stride);
+        ParserFilter parser_filter(part_diag.m_do_parser_filter,
                                    utils::parser::compileParser<ParticleDiag::m_nvars>
-                                       (particle_diags[i].m_particle_filter_parser.get()),
+                                       (part_diag.m_particle_filter_parser.get()),
                                    pc->getMass());
         parser_filter.m_units = InputUnits::SI;
-        GeometryFilter const geometry_filter(particle_diags[i].m_do_geom_filter,
-                                             particle_diags[i].m_diag_domain);
+        GeometryFilter const geometry_filter(part_diag.m_do_geom_filter,
+                                             part_diag.m_diag_domain);
 
         if (!isBTD) {
             particlesConvertUnits(ConvertDirection::WarpX_to_SI, pc, mass);
@@ -380,14 +400,14 @@ FlushFormatPlotfile::WriteParticles(const std::string& dir,
             }, true);
             particlesConvertUnits(ConvertDirection::SI_to_WarpX, pc, mass);
         } else {
-            PinnedMemoryParticleContainer* pinned_pc = particle_diags[i].getPinnedParticleContainer();
+            PinnedMemoryParticleContainer* pinned_pc = part_diag.getPinnedParticleContainer();
             tmp.copyParticles(*pinned_pc, true);
             particlesConvertUnits(ConvertDirection::WarpX_to_SI, &tmp, mass);
         }
         // real_names contains a list of all particle attributes.
         // real_flags & int_flags are 1 or 0, whether quantity is dumped or not.
         tmp.WritePlotFile(
-            dir, particle_diags[i].getSpeciesName(),
+            dir, part_diag.getSpeciesName(),
             real_flags, int_flags,
             real_names, int_names);
     }
@@ -404,7 +424,7 @@ WriteRawMF ( const MultiFab& F, const DistributionMapping& dm,
              const std::string& field_name,
              const int lev, const bool plot_guards )
 {
-    std::string prefix = amrex::MultiFabFileFullPrefix(lev,
+    const std::string prefix = amrex::MultiFabFileFullPrefix(lev,
                             filename, level_prefix, field_name);
     if (plot_guards) {
         // Dump original MultiFab F
@@ -430,7 +450,7 @@ WriteZeroRawMF( const MultiFab& F, const DistributionMapping& dm,
                 const std::string& field_name,
                 const int lev, const IntVect ng )
 {
-    std::string prefix = amrex::MultiFabFileFullPrefix(lev,
+    const std::string prefix = amrex::MultiFabFileFullPrefix(lev,
                             filename, level_prefix, field_name);
 
     MultiFab tmpF(F.boxArray(), dm, F.nComp(), ng);
@@ -467,7 +487,7 @@ WriteCoarseVector( const std::string field_name,
         WriteZeroRawMF( *Fz_fp, dm, filename, level_prefix, field_name+"z_cp", lev, ng );
     } else {
         // Interpolate coarse data onto fine grid
-        amrex::IntVect r_ratio = WarpX::GetInstance().refRatio(lev-1);
+        const amrex::IntVect r_ratio = WarpX::GetInstance().refRatio(lev-1);
         const Real* dx = WarpX::GetInstance().Geom(lev-1).CellSize();
         auto F = Interpolate::getInterpolatedVector( Fx_cp, Fy_cp, Fz_cp, Fx_fp, Fy_fp, Fz_fp,
                                     dm, r_ratio, dx, ng );
@@ -502,7 +522,7 @@ WriteCoarseScalar( const std::string field_name,
         WriteZeroRawMF( *F_fp, dm, filename, level_prefix, field_name+"_cp", lev, ng );
     } else {
         // Create an alias to the component `icomp` of F_cp
-        MultiFab F_comp(*F_cp, amrex::make_alias, icomp, 1);
+        const MultiFab F_comp(*F_cp, amrex::make_alias, icomp, 1);
         // Interpolate coarse data onto fine grid
         const amrex::IntVect r_ratio = WarpX::GetInstance().refRatio(lev-1);
         const Real* dx = WarpX::GetInstance().Geom(lev-1).CellSize();
@@ -552,7 +572,7 @@ FlushFormatPlotfile::WriteAllRawFields(
         {
             // Use the component 1 of `rho_fp`, i.e. rho_new for time synchronization
             // If nComp > 1, this is the upper half of the list of components.
-            MultiFab rho_new(warpx.getrho_fp(lev), amrex::make_alias, warpx.getrho_fp(lev).nComp()/2, warpx.getrho_fp(lev).nComp()/2);
+            const MultiFab rho_new(warpx.getrho_fp(lev), amrex::make_alias, warpx.getrho_fp(lev).nComp()/2, warpx.getrho_fp(lev).nComp()/2);
             WriteRawMF(rho_new, dm, raw_pltname, default_level_prefix, "rho_fp", lev, plot_raw_fields_guards);
         }
         if (warpx.get_pointer_phi_fp(lev) != nullptr) {

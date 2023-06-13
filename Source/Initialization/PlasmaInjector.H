@@ -97,6 +97,7 @@ public:
     amrex::Real q_tot = 0.0;
     long npart;
     int do_symmetrize = 0;
+    int symmetrization_order = 4;
 
     bool external_file = false; //! initialize from an openPMD file
     amrex::Real z_shift = 0.0; //! additional z offset for particle positions
@@ -161,8 +162,8 @@ protected:
     std::unique_ptr<TemperatureProperties> h_mom_temp;
     std::unique_ptr<VelocityProperties> h_mom_vel;
 
-    void parseDensity (amrex::ParmParse& pp);
-    void parseMomentum (amrex::ParmParse& pp);
+    void parseDensity (const amrex::ParmParse& pp);
+    void parseMomentum (const amrex::ParmParse& pp);
 };
 
 #endif
